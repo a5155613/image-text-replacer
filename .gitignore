@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+ehthumbs.db
+ehthumbs_vista.db
+
+# Temporary files
+*.tmp
+*.bak
+*.log
+
+# Project specific
+test_out/
+test_imgs/
+test_*_result.png
+*.json.bak
+
+# Trae IDE
+.trae/
