@@ -82,6 +82,34 @@ class AvatarReplace:
 
 
 @dataclass
+class AvatarTemplate:
+    """可复用的头像模板：记录位置+形状，下次只需更换头像图片路径即可复用。"""
+
+    name: str  # 用户给模板起的名字，如 "微信聊天头像"
+    rect: tuple[int, int, int, int]  # x, y, w, h（原图像素坐标）
+    shape: str = "circle"  # circle / rounded / square
+    created_at: str = ""  # ISO 时间戳，便于排序
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "rect": list(self.rect),
+            "shape": self.shape,
+            "created_at": self.created_at,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "AvatarTemplate":
+        rect = d.get("rect") or [0, 0, 0, 0]
+        return AvatarTemplate(
+            name=str(d.get("name", "未命名")),
+            rect=(int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])),
+            shape=str(d.get("shape", "circle")),
+            created_at=str(d.get("created_at", "")),
+        )
+
+
+@dataclass
 class TaskResult:
     """单张图片的处理结果。"""
 

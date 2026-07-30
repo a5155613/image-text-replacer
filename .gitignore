@@ -38,5 +38,12 @@ test_imgs/
 test_*_result.png
 *.json.bak
 
+# User data / generated
+avatar_templates.json
+~$*.xlsx
+~$*.xls
+*.tmp.xlsx
+*.tmp.csv
+
 # Trae IDE
 .trae/

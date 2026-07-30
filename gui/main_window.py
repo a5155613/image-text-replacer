@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMenuBar,
     QMessageBox,
+    QInputDialog,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -45,10 +46,11 @@ from PySide6.QtWidgets import (
 )
 
 import config_loader
+import template_store
 from avatar_editor import AvatarEditor
 from batch_processor import BatchProcessor
 from image_editor import ImageEditor
-from models import AvatarReplace, ReplaceRule, TextBox, TextStyle
+from models import AvatarReplace, AvatarTemplate, ReplaceRule, TextBox, TextStyle
 from ocr_engine import OcrEngine
 from style_detector import StyleDetector
 
@@ -90,6 +92,197 @@ class _OcrWorker(QThread):
             except Exception as e:
                 self.log.emit(f"[OCR失败] {os.path.basename(p)}：{e}")
         self.all_done.emit()
+
+
+class _SaveTemplateDialog(QDialog):
+    """保存头像操作为模板：用户输入模板名。"""
+
+    def __init__(self, op: AvatarReplace, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("保存为头像模板")
+        self.resize(380, 180)
+        self._op = op
+
+        form = QFormLayout(self)
+        self._name = QLineEdit()
+        self._name.setPlaceholderText("如：微信聊天头像、抖音评论头像")
+        self._name.setFocus()
+        form.addRow("模板名称:", self._name)
+
+        x, y, w, h = op.rect
+        info = QLabel(
+            f"位置: ({x}, {y})  尺寸: {w}×{h}  形状: {op.shape}"
+        )
+        info.setStyleSheet("color:#666;")
+        form.addRow("预览:", info)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        ok = QPushButton("保存模板")
+        cancel = QPushButton("取消")
+        ok.clicked.connect(self.accept)
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        form.addRow(btns)
+
+    def get_name(self) -> str:
+        return self._name.text().strip()
+
+
+class _AvatarTemplateDialog(QDialog):
+    """头像模板管理对话框：列表 + 多选批量加载/删除/重命名/导出/导入。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("头像模板库")
+        self.resize(560, 460)
+        self._templates: list[AvatarTemplate] = []
+        self._load_requested = False
+        self._load_target_path = ""
+        self._load_target_names: list[str] = []
+
+        layout = QVBoxLayout(self)
+
+        tip = QLabel(
+            "模板保存头像的位置和形状，下次使用时只需更换头像图片路径即可复用。\n"
+            "支持多选：按住 Ctrl 点击选择多个模板，批量加载应用到同一张图。"
+        )
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#666;")
+        layout.addWidget(tip)
+
+        self._list = QListWidget()
+        self._list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self._list.itemDoubleClicked.connect(self._on_load)
+        layout.addWidget(self._list, 1)
+
+        # 计数标签
+        self._count_lbl = QLabel("")
+        self._count_lbl.setStyleSheet("color:#888;")
+        self._list.itemSelectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self._count_lbl)
+
+        btn_row = QHBoxLayout()
+        b_load = QPushButton("批量加载并更换头像图")
+        b_rename = QPushButton("重命名")
+        b_del = QPushButton("删除")
+        b_export = QPushButton("导出")
+        b_import = QPushButton("导入")
+        b_close = QPushButton("关闭")
+        b_load.clicked.connect(self._on_load)
+        b_rename.clicked.connect(self._on_rename)
+        b_del.clicked.connect(self._on_delete)
+        b_export.clicked.connect(self._on_export)
+        b_import.clicked.connect(self._on_import)
+        b_close.clicked.connect(self.reject)
+        btn_row.addWidget(b_load)
+        btn_row.addWidget(b_rename)
+        btn_row.addWidget(b_del)
+        btn_row.addStretch()
+        btn_row.addWidget(b_export)
+        btn_row.addWidget(b_import)
+        btn_row.addWidget(b_close)
+        layout.addLayout(btn_row)
+
+        self._refresh()
+
+    def _refresh(self):
+        self._templates = template_store.list_templates()
+        self._list.clear()
+        for t in self._templates:
+            x, y, w, h = t.rect
+            item = QListWidgetItem(
+                f"📌 {t.name}  [{t.shape}]  ({x},{y},{w},{h})  "
+                f"{t.created_at or ''}"
+            )
+            item.setData(Qt.UserRole, t.name)
+            self._list.addItem(item)
+        self._on_selection_changed()
+
+    def _on_selection_changed(self):
+        selected = len(self._list.selectedItems())
+        total = self._list.count()
+        self._count_lbl.setText(f"已选 {selected} / {total} 个模板")
+
+    def _selected_names(self) -> list[str]:
+        return [
+            item.data(Qt.UserRole)
+            for item in self._list.selectedItems()
+        ]
+
+    def _on_load(self):
+        names = self._selected_names()
+        if not names:
+            QMessageBox.information(self, "提示", "请先选择至少一个模板")
+            return
+        # 选择新的头像图片（所有选中模板共用同一张新头像）
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择新的头像图片（将应用到所有选中模板）", "",
+            "图片 (*.png *.jpg *.jpeg *.bmp *.webp)"
+        )
+        if not path:
+            return
+        self._load_requested = True
+        self._load_target_path = path
+        self._load_target_names = names
+        self.accept()
+
+    def _on_rename(self):
+        names = self._selected_names()
+        if len(names) != 1:
+            QMessageBox.information(self, "提示", "重命名请只选中一个模板")
+            return
+        name = names[0]
+        new_name, ok = QInputDialog.getText(
+            self, "重命名模板", "新名称:", text=name
+        )
+        if ok and new_name.strip() and new_name.strip() != name:
+            template_store.rename_template(name, new_name.strip())
+            self._refresh()
+
+    def _on_delete(self):
+        names = self._selected_names()
+        if not names:
+            QMessageBox.information(self, "提示", "请先选择至少一个模板")
+            return
+        msg = f"删除选中的 {len(names)} 个模板？\n\n"
+        msg += "\n".join(f"  · {n}" for n in names[:8])
+        if len(names) > 8:
+            msg += f"\n  ... 以及另外 {len(names) - 8} 个"
+        if QMessageBox.question(
+            self, "确认", msg,
+            QMessageBox.Yes | QMessageBox.No,
+        ) == QMessageBox.Yes:
+            for n in names:
+                template_store.delete_template(n)
+            self._refresh()
+
+    def _on_export(self):
+        if not self._templates:
+            QMessageBox.information(self, "提示", "暂无模板可导出")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出模板", "avatar_templates.json", "JSON (*.json)"
+        )
+        if path:
+            template_store.export_templates(self._templates, path)
+            QMessageBox.information(self, "完成", f"已导出 {len(self._templates)} 个模板")
+
+    def _on_import(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入模板", "", "JSON (*.json)"
+        )
+        if path:
+            templates = template_store.import_templates(path)
+            self._refresh()
+            QMessageBox.information(self, "完成", f"导入后共 {len(templates)} 个模板")
+
+    def get_load_result(self) -> tuple[bool, list[str], str]:
+        """返回 (是否加载, 模板名列表, 新头像路径)。"""
+        if self._load_requested:
+            return True, self._load_target_names, self._load_target_path
+        return False, [], ""
 
 
 class _EditBoxDialog(QDialog):
@@ -301,11 +494,17 @@ class MainWindow(QMainWindow):
         av_row = QHBoxLayout()
         b_av_del = QPushButton("－ 删除选中")
         b_av_clear = QPushButton("清空")
+        b_save_tpl = QPushButton("💾 存为模板")
+        b_load_tpl = QPushButton("📂 模板库")
         b_av_del.clicked.connect(self._on_del_avatar_op)
         b_av_clear.clicked.connect(self._on_clear_avatar_ops)
+        b_save_tpl.clicked.connect(self._on_save_as_template)
+        b_load_tpl.clicked.connect(self._on_open_template_library)
         av_row.addWidget(b_av_del)
         av_row.addWidget(b_av_clear)
         av_row.addStretch()
+        av_row.addWidget(b_save_tpl)
+        av_row.addWidget(b_load_tpl)
         al.addLayout(av_row)
         right.addWidget(avatar_box)
 
@@ -624,6 +823,63 @@ class MainWindow(QMainWindow):
             av_name = os.path.basename(op.avatar_path) or "(空)"
             text = f"[{i}] {scope} · {op.shape} · ({x},{y},{w},{h}) ← {av_name}"
             self._avatar_list.addItem(QListWidgetItem(text))
+
+    # ---------- 头像模板管理 ----------
+
+    def _on_save_as_template(self):
+        row = self._avatar_list.currentRow()
+        if row < 0 or row >= len(self._avatar_ops):
+            QMessageBox.information(self, "提示", "请先在头像操作列表中选中一项")
+            return
+        op = self._avatar_ops[row]
+        dlg = _SaveTemplateDialog(op, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name = dlg.get_name()
+        if not name:
+            QMessageBox.warning(self, "提示", "模板名不能为空")
+            return
+        tmpl = AvatarTemplate(
+            name=name,
+            rect=op.rect,
+            shape=op.shape,
+        )
+        template_store.save_template(tmpl)
+        self._log(f"已保存模板：{name}（位置 {op.rect}，形状 {op.shape}）")
+
+    def _on_open_template_library(self):
+        dlg = _AvatarTemplateDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        loaded, tmpl_names, av_path = dlg.get_load_result()
+        if not loaded:
+            return
+        templates = template_store.list_templates()
+        name_map = {t.name: t for t in templates}
+        applied = 0
+        missing = []
+        for tmpl_name in tmpl_names:
+            tmpl = name_map.get(tmpl_name)
+            if tmpl is None:
+                missing.append(tmpl_name)
+                continue
+            op = AvatarReplace(
+                image_pattern="*",
+                rect=tmpl.rect,
+                avatar_path=av_path,
+                shape=tmpl.shape,
+            )
+            self._avatar_ops.append(op)
+            applied += 1
+        self._refresh_avatar_list()
+        if self._current_index >= 0:
+            self._show_image(self._current_index)
+        msg = f"已加载 {applied} 个模板，共用头像 {os.path.basename(av_path)}"
+        if missing:
+            msg += f"\n\n跳过不存在的模板：\n" + "\n".join(f"  · {n}" for n in missing)
+        self._log(msg.split("\n")[0])
+        if missing:
+            QMessageBox.warning(self, "部分模板不存在", msg)
 
     # ---------- 头像操作持久化 ----------
 
