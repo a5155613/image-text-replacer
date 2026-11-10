@@ -160,8 +160,10 @@ def main():
     # GUI 模式
     from PySide6.QtWidgets import QApplication
 
+    import db  # 初始化数据库连接（建表 + 默认管理员）
     from gui.main_window import MainWindow
 
+    db.get_conn()  # 触发建表与默认管理员创建
     app = QApplication(sys.argv)
     app.setApplicationName("批量图片文字替换工具")
     win = MainWindow()

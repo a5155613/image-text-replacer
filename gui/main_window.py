@@ -54,9 +54,16 @@ from models import AvatarReplace, AvatarTemplate, ReplaceRule, TextBox, TextStyl
 from ocr_engine import OcrEngine
 from style_detector import StyleDetector
 
+import auth
+import db
+from gui.admin_panel_dialog import AdminPanelDialog
 from gui.avatar_dialog import AvatarDialog
 from gui.image_canvas import ImageCanvas
+from gui.image_manager_dialog import ImageManagerDialog
+from gui.login_dialog import LoginDialog
 from gui.preview_dialog import PreviewDialog
+from gui.records_manager_dialog import RecordsManagerDialog
+from gui.results_manager_dialog import ResultsManagerDialog
 from gui.rules_table_model import RulesTableModel
 from gui.style_panel import StylePanel, _FONT_CHOICES
 
@@ -413,6 +420,11 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("批量图片文字替换工具")
         self.resize(1400, 860)
 
+        # 先登录
+        self._user: auth.SessionUser | None = None
+        if not self._do_login():
+            raise SystemExit(0)
+
         # 状态
         self._image_paths: list[str] = []
         self._current_index = -1
@@ -429,6 +441,45 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._build_menu()
         self._build_toolbar()
+        self._update_user_label()
+
+    # ---------- 登录 / 登出 ----------
+
+    def _do_login(self) -> bool:
+        dlg = LoginDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        self._user = dlg.get_user()
+        return self._user is not None
+
+    def _on_logout(self):
+        if QMessageBox.question(
+            self, "确认", "确定要退出登录吗？",
+            QMessageBox.Yes | QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        auth.logout()
+        self._user = None
+        self.hide()
+        # 重新拉起登录
+        dlg = LoginDialog()
+        if dlg.exec() == QDialog.Accepted:
+            self._user = dlg.get_user()
+            # 清理当前会话状态
+            self._image_paths.clear()
+            self._list.clear()
+            self._ocr_cache.clear()
+            self._avatar_ops.clear()
+            self._model.set_rules([])
+            self._current_index = -1
+            self._canvas.set_boxes([])
+            self._refresh_avatar_list()
+            self._update_user_label()
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        else:
+            raise SystemExit(0)
 
     # ---------- UI 构建 ----------
 
@@ -522,11 +573,21 @@ class MainWindow(QMainWindow):
         self._progress.setFixedWidth(260)
         self._progress.setVisible(False)
         self._status_label = QLabel("就绪")
+        self._user_label = QLabel("")
+        self._user_label.setStyleSheet("color:#2c3e50;padding:0 8px;")
         bar = self.statusBar()
+        bar.addPermanentWidget(self._user_label)
         bar.addWidget(self._progress)
         bar.addWidget(self._status_label, 1)
 
         self.setCentralWidget(central)
+
+    def _update_user_label(self):
+        if self._user is None:
+            self._user_label.setText("")
+            return
+        role = "管理员" if self._user.is_admin else "普通用户"
+        self._user_label.setText(f"👤 {self._user.username}（{role}）")
 
     def _build_menu(self):
         mb = self.menuBar()
@@ -563,6 +624,26 @@ class MainWindow(QMainWindow):
             a = QAction(text, self)
             a.triggered.connect(slot)
             m_avatar.addAction(a)
+
+        m_mgr = mb.addMenu("系统管理(&M)")
+        for text, slot in [
+            ("图片管理", self._on_image_manager),
+            ("替换记录管理", self._on_records_manager),
+            ("结果管理", self._on_results_manager),
+        ]:
+            a = QAction(text, self)
+            a.triggered.connect(slot)
+            m_mgr.addAction(a)
+        m_mgr.addSeparator()
+        a_admin = QAction("管理员面板", self)
+        a_admin.triggered.connect(self._on_admin_panel)
+        a_admin.setEnabled(self._user is not None and self._user.is_admin)
+        m_mgr.addAction(a_admin)
+
+        m_acc = mb.addMenu("账号(&U)")
+        a_logout = QAction("退出登录", self)
+        a_logout.triggered.connect(self._on_logout)
+        m_acc.addAction(a_logout)
 
         m_help = mb.addMenu("帮助(&H)")
         a = QAction("关于", self)
@@ -601,6 +682,13 @@ class MainWindow(QMainWindow):
         for p in paths:
             self._image_paths.append(p)
             self._list.addItem(QListWidgetItem(os.path.basename(p)))
+            # 持久化到数据库
+            if self._user is not None:
+                try:
+                    size = os.path.getsize(p) if os.path.exists(p) else 0
+                    db.add_image(self._user.id, os.path.basename(p), p, size)
+                except Exception as e:
+                    self._log(f"图片记录保存失败：{e}")
         if self._current_index < 0:
             self._list.setCurrentRow(0)
 
@@ -698,6 +786,7 @@ class MainWindow(QMainWindow):
                 style=style,
             )
             self._model.add_rule(rule)
+            self._persist_rule(rule)
             self._log(f"已添加规则：{tb.text!r} → {new_text!r}")
 
     def _current_pattern(self) -> str:
@@ -717,7 +806,49 @@ class MainWindow(QMainWindow):
 
     def _on_apply_rule_from_panel(self, rule: ReplaceRule):
         self._model.add_rule(rule)
+        self._persist_rule(rule)
         self._log(f"已添加规则：{rule.old_text!r} → {rule.new_text!r}")
+
+    def _persist_rule(self, rule: ReplaceRule) -> None:
+        """将替换规则持久化到数据库（替换记录管理）。"""
+        if self._user is None:
+            return
+        try:
+            color = (
+                f"#{rule.style.font_color[0]:02x}{rule.style.font_color[1]:02x}{rule.style.font_color[2]:02x}"
+                if rule.style.font_color is not None
+                else None
+            )
+            db.add_record(
+                user_id=self._user.id,
+                image_pattern=rule.image_pattern,
+                match_mode=rule.match_mode,
+                old_text=rule.old_text,
+                new_text=rule.new_text,
+                font=rule.style.font_path,
+                font_size=rule.style.font_size,
+                color=color,
+                bold=rule.style.bold,
+            )
+        except Exception as e:
+            self._log(f"替换记录保存失败：{e}")
+
+    # ---------- 系统管理对话框 ----------
+
+    def _on_image_manager(self):
+        ImageManagerDialog(self).exec()
+
+    def _on_records_manager(self):
+        RecordsManagerDialog(self).exec()
+
+    def _on_results_manager(self):
+        ResultsManagerDialog(self).exec()
+
+    def _on_admin_panel(self):
+        if self._user is None or not self._user.is_admin:
+            QMessageBox.warning(self, "提示", "仅管理员可访问")
+            return
+        AdminPanelDialog(self).exec()
 
     # ---------- 头像替换 ----------
 
@@ -790,6 +921,7 @@ class MainWindow(QMainWindow):
             style=TextStyle(),
         )
         self._model.add_rule(rule)
+        self._persist_rule(rule)
         self._log(f"已添加全局规则：{old_text!r} → {new_text!r}（{mode}）")
 
     def _on_del_avatar_op(self):
@@ -1064,6 +1196,24 @@ class MainWindow(QMainWindow):
         self._progress.setVisible(False)
         ok = sum(1 for r in results if r.success)
         fail = len(results) - ok
+        # 持久化结果到数据库
+        if self._user is not None:
+            # 构建 filename -> image_id 映射
+            img_map = {}
+            for r in db.list_images(self._user.id):
+                img_map[r["filename"]] = r["id"]
+            for r in results:
+                fname = os.path.basename(r.image_path)
+                db.add_result(
+                    user_id=self._user.id,
+                    image_id=img_map.get(fname),
+                    image_filename=fname,
+                    output_path=r.output_path,
+                    success=r.success,
+                    replaced_count=r.replaced_count,
+                    avatar_count=r.avatar_count,
+                    error=r.error,
+                )
         msg = f"批量完成：成功 {ok} 张，失败 {fail} 张"
         if fail:
             errs = "\n".join(

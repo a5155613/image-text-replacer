@@ -1,6 +1,6 @@
 """头像模板持久化：保存/加载/管理可复用的头像位置模板。
 
-模板存储在用户目录下的 avatar_templates.json，与项目代码解耦。
+模板存储位置与 db.py 一致（家目录 ~/.image-text-replacer/，不可写时回退到项目 .data/）。
 """
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ import os
 from datetime import datetime
 from pathlib import Path
 
+from db import _DB_DIR  # 复用 db 的数据目录解析逻辑
 from models import AvatarTemplate
 
-# 默认存储位置：用户主目录下 .image-text-replacer/
-_DEFAULT_DIR = Path.home() / ".image-text-replacer"
+_DEFAULT_DIR = _DB_DIR
 _DEFAULT_FILE = _DEFAULT_DIR / "avatar_templates.json"
 
 
